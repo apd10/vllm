@@ -68,6 +68,18 @@ python vllm/attention_scripts/profile_attention.py \
 
 This will generate a Chrome trace file that can be viewed in `chrome://tracing`.
 
+#### Use CUDA Graph for Faster Benchmarking
+
+```bash
+python vllm/attention_scripts/profile_attention.py \
+    --backend FLASH_ATTN \
+    --context-length 4096 \
+    --batch-size 8 \
+    --use-cuda-graph
+```
+
+CUDA graphs reduce kernel launch overhead by recording the execution once and replaying it. This provides more accurate performance measurements for production scenarios where CUDA graphs are used.
+
 #### Configure Model Parameters (e.g., for GQA)
 
 ```bash
@@ -91,6 +103,7 @@ python vllm/attention_scripts/profile_attention.py \
 | `--num-warmup` | int | `10` | Number of warmup iterations |
 | `--num-iterations` | int | `100` | Number of benchmark iterations |
 | `--use-profiler` | flag | `False` | Use torch profiler for detailed analysis |
+| `--use-cuda-graph` | flag | `False` | Use CUDA graph (record once, replay) |
 | `--dtype` | str | `float16` | Data type (`float16` or `bfloat16`) |
 | `--num-heads` | int | `32` | Number of attention heads |
 | `--num-kv-heads` | int | `32` | Number of KV heads (for GQA) |
@@ -162,6 +175,7 @@ Context Length  Batch Size   Latency (ms)    Throughput      TFLOPS
 - TFLOPS calculations are approximate and based on standard attention FLOP counts
 - For accurate profiling, ensure the GPU is not under load from other processes
 - Use `--use-profiler` sparingly as it adds overhead and generates large trace files
+- **CUDA graphs** (`--use-cuda-graph`) eliminate kernel launch overhead, providing measurements closer to production performance where CUDA graphs are enabled. The graph is recorded once during an additional warmup phase, then replayed for all benchmark iterations.
 
 ### Understanding the Output
 
@@ -236,3 +250,58 @@ python vllm/attention_scripts/profile_attention.py \
 ```
 
 Then open the generated trace file in Chrome at `chrome://tracing`.
+
+#### Benchmark with CUDA Graph (Production-Like Performance)
+```bash
+python vllm/attention_scripts/profile_attention.py \
+    --backend FLASH_ATTN \
+    --context-length 4096 8192 16384 \
+    --batch-size 8 \
+    --use-cuda-graph
+```
+
+This measures performance with CUDA graphs enabled, which is closer to how vLLM runs in production.
+
+---
+
+## profile_vllm.py
+
+A script for profiling end-to-end vLLM inference using PyTorch profiler. This script profiles the complete inference pipeline including model loading, prompt processing, and token generation.
+
+### Usage
+
+#### Basic Usage
+
+Profile vLLM inference with the default model:
+```bash
+python vllm/attention_scripts/profile_vllm.py
+```
+
+This will:
+- Load the Qwen3-4B-Instruct model
+- Generate a 16,000 token prompt
+- Run warmup iterations
+- Profile the generation process
+- Save profiling results to `./vllm_profile` directory
+
+#### View Profiling Results
+
+The script generates PyTorch profiler traces that can be viewed in Chrome:
+1. Open Chrome browser
+2. Navigate to `chrome://tracing`
+3. Load the trace file from `./vllm_profile` directory
+
+### What This Script Does
+
+- Creates an LLM instance with PyTorch profiler enabled
+- Generates a long prompt (16,000 tokens by default)
+- Performs warmup runs
+- Profiles text generation with the configured sampling parameters
+- Outputs the generated text and profiling data
+
+### Notes
+
+- The script uses a fixed model (`Qwen/Qwen3-4B-Instruct-2507`) and prompt length (16,000 tokens)
+- Profiling data is saved to `./vllm_profile` directory
+- The script includes a 10-second buffer at the end to ensure profiling data is fully written
+- For custom configurations, modify the script parameters directly

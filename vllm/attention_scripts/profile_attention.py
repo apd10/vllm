@@ -74,6 +74,7 @@ class ProfileConfig:
     num_warmup: int
     num_iterations: int
     use_profiler: bool
+    use_cuda_graph: bool
     dtype: str
     num_heads: int
     num_kv_heads: int
@@ -350,18 +351,44 @@ def profile_attention_forward(
     # Create mock layer
     mock_layer = MockQKVLinear(hidden_size, config.num_heads, config.head_size)
     
+    print(f"\nModel Configuration:")
+    print(f"  - Num heads: {config.num_heads}")
+    print(f"  - Num KV heads: {config.num_kv_heads}")
+    print(f"  - Head size: {config.head_size}")
+    print(f"  - Hidden size: {hidden_size}")
+    print(f"  - Block size: {config.block_size}")
+    print(f"  - Dtype: {dtype}")
+    
     print(f"\nSetup complete (DECODE mode - measuring time to generate 1 new token):")
+    print(f"\nInput Tensor Shapes:")
     print(f"  - Query shape: {query.shape} (batch_size={batch_size}, query_len=1)")
     print(f"  - Key shape: {key.shape} (for new token)")
     print(f"  - Value shape: {value.shape} (for new token)")
-    print(f"  - KV cache shape: {kv_cache.shape}")
-    print(f"  - KV cache contains: {context_length} tokens per sequence")
     print(f"  - Output shape: {output.shape}")
-    print(f"  - Num query tokens: {num_tokens}")
+    print(f"\nKV Cache:")
+    print(f"  - KV cache shape: {kv_cache.shape}")
+    print(f"  - KV cache dtype: {kv_cache.dtype}")
+    print(f"  - KV cache device: {kv_cache.device}")
+    print(f"  - KV cache contains: {context_length} tokens per sequence")
     print(f"  - Num blocks: {num_blocks}")
-    print(f"  - Metadata seq_lens: {common_metadata.seq_lens.tolist()[:min(3, batch_size)]}{'...' if batch_size > 3 else ''}")
-    print(f"  - Metadata max_seq_len: {common_metadata.max_seq_len}")
-    print(f"  - Metadata max_query_len: {common_metadata.max_query_len}")
+    print(f"\nMetadata:")
+    print(f"  - Num query tokens: {num_tokens}")
+    print(f"  - Num reqs: {common_metadata.num_reqs}")
+    print(f"  - Num actual tokens: {common_metadata.num_actual_tokens}")
+    print(f"  - Seq lens shape: {common_metadata.seq_lens.shape}")
+    print(f"  - Seq lens (sample): {common_metadata.seq_lens.tolist()[:min(3, batch_size)]}{'...' if batch_size > 3 else ''}")
+    print(f"  - Max seq len: {common_metadata.max_seq_len}")
+    print(f"  - Max query len: {common_metadata.max_query_len}")
+    print(f"  - Query start loc shape: {common_metadata.query_start_loc.shape}")
+    print(f"  - Block table shape: {common_metadata.block_table_tensor.shape}")
+    print(f"  - Slot mapping shape: {common_metadata.slot_mapping.shape}")
+    
+    # Log backend-specific metadata shapes if available
+    if hasattr(attn_metadata, '__dict__'):
+        print(f"\nBackend-Specific Metadata Attributes:")
+        for attr_name, attr_value in attn_metadata.__dict__.items():
+            if isinstance(attr_value, torch.Tensor):
+                print(f"  - {attr_name} shape: {attr_value.shape}, dtype: {attr_value.dtype}")
     
     # Warmup
     print(f"\nWarming up ({config.num_warmup} iterations)...")
@@ -404,6 +431,40 @@ def profile_attention_forward(
     # Benchmark
     print(f"Benchmarking ({config.num_iterations} iterations)...")
     
+    # CUDA Graph support
+    cuda_graph = None
+    if config.use_cuda_graph:
+        print(f"\nRecording CUDA graph...")
+        # Create a CUDA graph
+        cuda_graph = torch.cuda.CUDAGraph()
+        
+        # Warmup before recording (3 extra iterations for graph recording)
+        for _ in range(3):
+            attn_impl.forward(
+                layer=mock_layer,
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+        torch.cuda.synchronize()
+        
+        # Record the graph
+        with torch.cuda.graph(cuda_graph):
+            attn_impl.forward(
+                layer=mock_layer,
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+        torch.cuda.synchronize()
+        print(f"CUDA graph recorded successfully!")
+    
     if config.use_profiler:
         with torch.profiler.profile(
             activities=[
@@ -411,28 +472,47 @@ def profile_attention_forward(
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             record_shapes=True,
+            profile_memory=True,
             with_stack=True,
+            with_flops=True,
         ) as prof:
             for _ in range(config.num_iterations):
-                attn_impl.forward(
-                    layer=mock_layer,
-                    query=query,
-                    key=key,
-                    value=value,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    output=output,
-                )
+                if cuda_graph is not None:
+                    cuda_graph.replay()
+                else:
+                    attn_impl.forward(
+                        layer=mock_layer,
+                        query=query,
+                        key=key,
+                        value=value,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        output=output,
+                    )
             torch.cuda.synchronize()
         
         # Print profiler results
-        print("\nProfiler Results:")
-        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+        print("\nProfiler Results (Top 20 by CUDA time):")
+        print(prof.key_averages().table(
+            sort_by="cuda_time_total", 
+            row_limit=20,
+            max_name_column_width=80
+        ))
+        
+        # Print profiler results with shapes
+        print("\nProfiler Results with Input Shapes (Top 15 by CUDA time):")
+        print(prof.key_averages(group_by_input_shape=True).table(
+            sort_by="cuda_time_total",
+            row_limit=15,
+            max_name_column_width=60,
+            max_shapes_column_width=80
+        ))
         
         # Save trace
         trace_file = f"trace_{config.backend}_ctx{context_length}_bs{batch_size}.json"
         prof.export_chrome_trace(trace_file)
         print(f"\nTrace saved to: {trace_file}")
+        print(f"View the trace at chrome://tracing")
     
     # Measure latency
     start_time = time.perf_counter()
@@ -441,15 +521,18 @@ def profile_attention_forward(
     
     start_event.record()
     for _ in range(config.num_iterations):
-        attn_impl.forward(
-            layer=mock_layer,
-            query=query,
-            key=key,
-            value=value,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            output=output,
-        )
+        if cuda_graph is not None:
+            cuda_graph.replay()
+        else:
+            attn_impl.forward(
+                layer=mock_layer,
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+            )
     end_event.record()
     torch.cuda.synchronize()
     
@@ -542,6 +625,12 @@ def main():
     )
     
     parser.add_argument(
+        "--use-cuda-graph",
+        action="store_true",
+        help="Use CUDA graph for benchmarking (record once, replay multiple times)",
+    )
+    
+    parser.add_argument(
         "--dtype",
         type=str,
         default="float16",
@@ -559,7 +648,7 @@ def main():
     parser.add_argument(
         "--num-kv-heads",
         type=int,
-        default=32,
+        default=8,
         help="Number of KV heads (for GQA)",
     )
     
@@ -586,6 +675,7 @@ def main():
         num_warmup=args.num_warmup,
         num_iterations=args.num_iterations,
         use_profiler=args.use_profiler,
+        use_cuda_graph=args.use_cuda_graph,
         dtype=args.dtype,
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
@@ -600,6 +690,7 @@ def main():
     print(f"  Num warmup: {config.num_warmup}")
     print(f"  Num iterations: {config.num_iterations}")
     print(f"  Use profiler: {config.use_profiler}")
+    print(f"  Use CUDA graph: {config.use_cuda_graph}")
     print(f"  Dtype: {config.dtype}")
     print(f"  Num heads: {config.num_heads}")
     print(f"  Num KV heads: {config.num_kv_heads}")
