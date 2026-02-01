@@ -1,13 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+
+@config
+@dataclass
+class IndexerConfig:
+    """Configuration for sparse attention indexer."""
+    
+    indexer_type: str = "streaming"
+    """Type of indexer: 'streaming', 'custom', etc."""
+    
+    # Streaming indexer specific parameters
+    num_sink_tokens: int = 4
+    """Number of initial tokens to always attend to (attention sink)."""
+    
+    local_window_size: int = 1024
+    """Size of local attention window."""
+    
+    max_sparse_k: int = 2048
+    """Maximum number of sparse keys per head (buffer allocation size)."""
+    
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.num_sink_tokens < 0:
+            raise ValueError(f"num_sink_tokens must be >= 0, got {self.num_sink_tokens}")
+        if self.local_window_size < 0:
+            raise ValueError(f"local_window_size must be >= 0, got {self.local_window_size}")
+        if self.max_sparse_k < self.num_sink_tokens + self.local_window_size:
+            raise ValueError(
+                f"max_sparse_k ({self.max_sparse_k}) must be >= "
+                f"num_sink_tokens + local_window_size ({self.num_sink_tokens + self.local_window_size})"
+            )
 
 
 @config
@@ -44,6 +75,13 @@ class AttentionConfig:
 
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
+    
+    # SKLT sparse attention configuration
+    indexer_config: Optional[IndexerConfig] = None
+    """Configuration for sparse attention indexer (used by SKLT backend)."""
+    
+    use_sparse_attention: bool = False
+    """Enable sparse attention patterns."""
 
     def compute_hash(self) -> str:
         """

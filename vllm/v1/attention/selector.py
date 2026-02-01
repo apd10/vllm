@@ -67,6 +67,11 @@ def get_attn_backend(
 
     vllm_config = get_current_vllm_config()
     backend_enum = vllm_config.attention_config.backend
+    
+    # If use_sparse is not explicitly set but backend is SKLT or sparse attention is enabled,
+    # use the value from attention config
+    if not use_sparse and vllm_config.attention_config.use_sparse_attention:
+        use_sparse = True
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
