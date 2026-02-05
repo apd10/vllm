@@ -50,89 +50,67 @@ def sklt_sparse_attention(
     head_size = query.shape[2]
     num_heads_per_kv = num_heads // num_kv_heads
     
-    # Move to CPU for indexing operations
-    query_start_loc_cpu = query_start_loc.cpu()
-    seq_lens_cpu = seq_lens.cpu()
-    block_table_cpu = block_table.cpu()
-    
-    # Process each sequence in batch
-    for b in range(batch_size):
-        q_start = query_start_loc_cpu[b].item()
-        q_end = query_start_loc_cpu[b + 1].item()
-        num_q = q_end - q_start
-        
-        if num_q == 0:
-            continue
-        
-        # Process each query token
-        for q_idx in range(num_q):
-            q_token_idx = q_start + q_idx
-            q_vec = query[q_token_idx]  # (num_heads, head_size)
-            
-            # Process each query head
-            for h in range(num_heads):
-                # Get sparse pattern for this query head
-                sparse_k = sparsity_info.sparse_len[b, q_idx, h, 0].item()
-                
-                if sparse_k == 0:
-                    # No keys to attend to, output zeros
-                    output[q_token_idx, h] = 0.0
-                    continue
-                
-                indices = sparsity_info.sparse_idx[b, q_idx, h, :sparse_k]
-                weights = sparsity_info.sparse_weights[b, q_idx, h, :sparse_k]
-                
-                # Determine KV head for this query head (GQA)
-                kv_head = h // num_heads_per_kv
-                
-                # Gather keys and values from KV cache using indices
-                k_sparse_list = []
-                v_sparse_list = []
-                
-                for idx in indices:
-                    idx_val = idx.item()
-                    
-                    # Convert sequence position to block coordinates
-                    block_idx = idx_val // block_size
-                    block_offset = idx_val % block_size
-                    
-                    # Lookup physical block in block table
-                    physical_block = block_table_cpu[b, block_idx].item()
-                    
-                    # Extract key and value from cache
-                    k_vec = key_cache[physical_block, block_offset, kv_head]  # (head_size,)
-                    v_vec = value_cache[physical_block, block_offset, kv_head]  # (head_size,)
-                    
-                    k_sparse_list.append(k_vec)
-                    v_sparse_list.append(v_vec)
-                
-                # Stack into tensors
-                k_sparse = torch.stack(k_sparse_list)  # (sparse_k, head_size)
-                v_sparse = torch.stack(v_sparse_list)  # (sparse_k, head_size)
-                
-                # Compute attention scores: Q @ K^T
-                scores = torch.matmul(
-                    q_vec[h].unsqueeze(0),  # (1, head_size)
-                    k_sparse.transpose(0, 1)  # (head_size, sparse_k)
-                ) * scale  # (1, sparse_k)
-                
-                scores = scores.squeeze(0)  # (sparse_k,)
-                
-                # Apply sparse weights (element-wise multiply)
-                # This allows for weighted attention, not just binary masks
-                # Convert weights to match scores dtype
-                weights = weights.to(scores.dtype)
-                scores = scores * weights
-                
-                # Softmax over sparse keys
-                attn_weights = F.softmax(scores, dim=0)  # (sparse_k,)
-                
-                # Weighted sum of values
-                out_vec = torch.matmul(
-                    attn_weights.unsqueeze(0),  # (1, sparse_k)
-                    v_sparse  # (sparse_k, head_size)
-                )  # (1, head_size)
-                
-                output[q_token_idx, h] = out_vec.squeeze(0)
+    if query.numel() == 0:
+        return output
+
+    query_start_loc = query_start_loc.to(query.device)
+    block_table = block_table.to(query.device)
+    num_tokens = query.shape[0]
+
+    if torch.cuda.is_current_stream_capturing():
+        # CUDA graph capture path: uniform single-token decode.
+        # Use direct batch ids to avoid unsupported ops in capture.
+        batch_ids = torch.arange(num_tokens, device=query.device)
+        q_idx = torch.zeros(num_tokens, device=query.device, dtype=torch.int64)
+    else:
+        num_q = query_start_loc[1:] - query_start_loc[:-1]  # (B,)
+        if num_q.sum().item() != num_tokens:
+            raise RuntimeError(
+                f"query_start_loc total ({int(num_q.sum().item())}) "
+                f"does not match num_tokens ({num_tokens})."
+            )
+        batch_ids = torch.repeat_interleave(
+            torch.arange(batch_size, device=query.device),
+            num_q.to(torch.int64),
+        )
+        token_pos = torch.arange(num_tokens, device=query.device)
+        q_idx = token_pos - query_start_loc[batch_ids]
+
+    q_vec = query  # (T, H, D)
+    kmax = sparsity_info.sparse_idx.shape[-1]
+    pos = torch.arange(kmax, device=query.device).view(1, -1)
+    block_table_per = block_table[batch_ids]  # (T, max_blocks)
+
+    for h in range(num_heads):
+        sparse_len = sparsity_info.sparse_len[batch_ids, q_idx, h, 0]  # (T,)
+        sparse_idx = sparsity_info.sparse_idx[batch_ids, q_idx, h]  # (T, K)
+        mask = pos < sparse_len.unsqueeze(1)
+
+        idx = torch.where(mask, sparse_idx, torch.zeros_like(sparse_idx))
+        block_idx = idx // block_size
+        block_offset = idx % block_size
+
+        physical_block = torch.gather(block_table_per, 1, block_idx)
+        kv_head = h // num_heads_per_kv
+        k_sparse = key_cache[physical_block, block_offset, kv_head]  # (T, K, D)
+        v_sparse = value_cache[physical_block, block_offset, kv_head]  # (T, K, D)
+
+        scores = (k_sparse * q_vec[:, h].unsqueeze(1)).sum(-1) * scale  # (T, K)
+        if sparsity_info.sparse_weights is not None:
+            sparse_weights = sparsity_info.sparse_weights[batch_ids, q_idx, h]
+            scores = scores * sparse_weights.to(scores.dtype)
+
+        scores = scores.masked_fill(~mask, -1e9)
+        attn_weights = F.softmax(scores, dim=-1)
+
+        has_keys = sparse_len > 0
+        attn_weights = torch.where(
+            has_keys.unsqueeze(1),
+            attn_weights,
+            torch.zeros_like(attn_weights),
+        )
+
+        out_vec = torch.einsum("tk,tkd->td", attn_weights, v_sparse)
+        output[:num_tokens, h] = out_vec
     
     return output

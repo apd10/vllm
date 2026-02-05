@@ -42,7 +42,7 @@ class StreamingIndexer(BaseIndexer):
         max_batch = 512     # Maximum concurrent sequences (matches max CUDA graph capture size)
         max_queries = 1     # Decode only: single query token per sequence
         max_heads = 128     # Maximum attention heads (to support most models)
-        max_k = self.config.max_sparse_k
+        max_k = min(self.config.max_sparse_k, self.get_max_sparse_k())
         
         logger.info(
             f"StreamingIndexer: Allocating buffers for "
@@ -120,73 +120,86 @@ class StreamingIndexer(BaseIndexer):
         sparse_idx.fill_(-1)  # Invalid index marker
         sparse_weights.fill_(0.0)
         
-        # Move seq_lens and query_start_loc to CPU for iteration
-        seq_lens_cpu = seq_lens.cpu()
-        query_start_loc_cpu = query_start_loc.cpu()
-        
-        # Compute for each sequence in batch
-        for b in range(batch_size):
-            seq_len = seq_lens_cpu[b].item()
-            q_start = query_start_loc_cpu[b].item()
-            q_end = query_start_loc_cpu[b + 1].item()
-            num_q = q_end - q_start
-            
-            if num_q == 0:
-                continue
-            
-            # SKLT only supports single-token decode (num_q must be 1)
-            # For chunked prefill or multi-token scenarios, skip this sequence
-            # (fallback attention will be used in sklt_impl.py)
-            if num_q > max_queries:
-                logger.warning_once(
-                    f"SKLT: Sequence has {num_q} query tokens but buffer only supports {max_queries}. "
-                    f"This should only happen during CUDA graph warmup. Skipping sparsity computation.",
-                    scope="sklt_multi_query_skip"
-                )
-                continue
-            
-            # Context length (already computed tokens)
-            ctx_len = seq_len - num_q
-            
-            for q_idx in range(num_q):
-                # Current query position in sequence
-                q_pos = ctx_len + q_idx
-                
-                # Build sparse pattern for this query
-                indices = []
-                
-                # 1. Add sink tokens (first K tokens, up to current position)
-                sink_end = min(num_sink, q_pos + 1)
-                indices.extend(range(sink_end))
-                
-                # 2. Add local window (last W tokens before and including query)
-                # Start from max(sink_end, q_pos + 1 - window_size) to avoid duplicates with sink
-                window_start = max(num_sink, q_pos + 1 - window_size)
-                window_end = q_pos + 1  # Include current position
-                if window_start < window_end:
-                    indices.extend(range(window_start, window_end))
-                
-                # Remove duplicates and sort (should already be sorted, but be safe)
-                indices = sorted(set(indices))
-                sparse_k = len(indices)
-                
-                # Validate we don't exceed buffer size
-                if sparse_k > self.config.max_sparse_k:
-                    logger.warning(
-                        f"Sparse k ({sparse_k}) exceeds max_sparse_k ({self.config.max_sparse_k}). "
-                        f"Truncating to max_sparse_k."
-                    )
-                    indices = indices[:self.config.max_sparse_k]
-                    sparse_k = self.config.max_sparse_k
-                
-                # Convert to tensor
-                indices_tensor = torch.tensor(indices, dtype=torch.int32, device=self.device)
-                
-                # Populate for all query heads (same pattern across heads for now)
-                for h in range(num_query_heads):
-                    sparse_len[b, q_idx, h, 0] = sparse_k
-                    sparse_idx[b, q_idx, h, :sparse_k] = indices_tensor
-                    sparse_weights[b, q_idx, h, :sparse_k] = 1.0  # Uniform weights
+        # Compute per-sequence query counts on device.
+        q_start = query_start_loc[:batch_size]
+        q_end = query_start_loc[1:batch_size + 1]
+        num_q = q_end - q_start
+
+        # SKLT only supports single-token decode (num_q must be 1).
+        # For chunked prefill or multi-token scenarios, skip these sequences.
+        if (num_q > max_queries).any():
+            logger.warning_once(
+                f"SKLT: Sequence has >{max_queries} query tokens but buffer only supports {max_queries}. "
+                f"This should only happen during CUDA graph warmup. Skipping sparsity computation.",
+                scope="sklt_multi_query_skip",
+            )
+
+        # Only decode (0 or 1 query token per sequence) is supported here.
+        assert (num_q <= 1).all(), (
+            "StreamingIndexer only supports decode; "
+            "multi-token queries must use fallback attention."
+        )
+        valid_mask = num_q == 1
+        seq_lens_i32 = seq_lens.to(torch.int32)
+        num_q_i32 = num_q.to(torch.int32)
+        q_pos = seq_lens_i32 - num_q_i32  # q_idx is always 0 for decode
+
+        sink_end = torch.minimum(
+            torch.tensor(num_sink, device=self.device, dtype=torch.int32),
+            q_pos + 1,
+        )
+        window_start = torch.maximum(
+            torch.tensor(num_sink, device=self.device, dtype=torch.int32),
+            q_pos + 1 - window_size,
+        )
+        window_end = q_pos + 1
+
+        sink_len = sink_end
+        window_len = torch.clamp(window_end - window_start, min=0)
+        sparse_k = sink_len + window_len
+
+        buffer_k = sparse_idx.shape[-1]
+        max_k = min(self.config.max_sparse_k, buffer_k)
+        if (sparse_k > max_k).any():
+            logger.warning(
+                f"Sparse k ({int(sparse_k.max().item())}) exceeds max_sparse_k ({max_k}). "
+                f"Truncating to max_sparse_k."
+            )
+        sparse_k = torch.minimum(
+            sparse_k, torch.tensor(max_k, device=self.device, dtype=torch.int32)
+        )
+        sparse_k = torch.where(valid_mask, sparse_k, torch.zeros_like(sparse_k))
+
+        # Build indices for each batch in a vectorized manner.
+        pos = torch.arange(buffer_k, device=self.device, dtype=torch.int32).unsqueeze(0)
+        sink_len_exp = sink_len.unsqueeze(1)
+        window_start_exp = window_start.unsqueeze(1)
+        sparse_k_exp = sparse_k.unsqueeze(1)
+        valid_pos = pos < max_k
+
+        indices = torch.where(
+            pos < sink_len_exp,
+            pos,
+            window_start_exp + (pos - sink_len_exp),
+        )
+        indices = torch.where(
+            valid_pos & (pos < sparse_k_exp),
+            indices,
+            torch.full_like(indices, -1),
+        )
+
+        weights = (valid_pos & (pos < sparse_k_exp)).to(torch.float32)
+
+        # Populate for all query heads (same pattern across heads).
+        sparse_len[:, 0, :num_query_heads, 0] = sparse_k.unsqueeze(1).expand(
+            -1, num_query_heads
+        )
+        sparse_idx[:, 0, :num_query_heads, :] = indices.unsqueeze(1).expand(
+            -1, num_query_heads, -1
+        )
+        sparse_weights[:, 0, :num_query_heads, :] = weights.unsqueeze(1).expand(
+            -1, num_query_heads, -1
+        )
         
         return SparsityInfo(
             sparse_len=sparse_len,

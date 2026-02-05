@@ -135,6 +135,13 @@ def main():
         help="Number of decode steps to profile (max_tokens)",
     )
     
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.6,
+        help="Fraction of GPU memory to use for KV cache",
+    )
+    
     args = parser.parse_args()
     
     print(f"\n{'='*80}")
@@ -146,6 +153,7 @@ def main():
     print(f"  Sink tokens: {args.sink_tokens}")
     print(f"  Window size: {args.window_size}")
     print(f"  Max sparse k: {args.max_sparse_k}")
+    print(f"  GPU memory utilization: {args.gpu_memory_utilization}")
     print(f"  Profiler output: {args.profiler_dir}")
     print(f"{'='*80}\n")
     
@@ -168,12 +176,16 @@ def main():
         model=args.model,
         tensor_parallel_size=1,
         attention_config=attention_config,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         profiler_config={
             "profiler": "torch",
             "torch_profiler_dir": args.profiler_dir,
+            # Only capture post-cudagraph decode iterations.
+            "ignore_frontend": True,
+            "delay_iterations": 2,
         },
         max_model_len=args.context_length + 20,
-        enforce_eager=True,  # Required for SKLT PyTorch implementation (no CUDA graphs)
+        # enforce_eager=True,
     )
     
     print("✓ LLM initialized")
@@ -201,9 +213,9 @@ def main():
     print(f"\nStarting profiling (will generate {args.num_decode_steps} tokens)...")
     print("  Profiler is active - this may be slower than normal")
     
-    #llm.start_profile()
+    llm.start_profile()
     outputs = llm.generate([prompt], sampling_params)
-    #llm.stop_profile()
+    llm.stop_profile()
     
     print("✓ Profiling complete")
     

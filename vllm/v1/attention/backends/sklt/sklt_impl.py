@@ -139,19 +139,20 @@ class SKLTAttentionImpl(AttentionImpl[SKLTAttentionMetadata]):
                 "For optimal performance, use FLASH_ATTN backend for prefill phase.",
                 scope="sklt_prefill_fallback"
             )
-            logger.info(f"SKLT: Prefill")
+            logger.debug("SKLT: Prefill")
             # Fallback to standard attention for prefill
-            return self._forward_prefill_fallback(
-                query=query,
-                key=key,
-                value=value,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                output=output,
-                attn_metadata=attn_metadata,
-                num_actual_tokens=num_actual_tokens,
-            )
-        logger.info(f"SKLT: Decoding")
+            with torch.profiler.record_function("SKLT/prefill_fallback"):
+                return self._forward_prefill_fallback(
+                    query=query,
+                    key=key,
+                    value=value,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    output=output,
+                    attn_metadata=attn_metadata,
+                    num_actual_tokens=num_actual_tokens,
+                )
+        logger.debug(f"SKLT: Decoding")
 
         # Phase 2: Refine sparsity if needed (for query-dependent indexers)
         if attn_metadata.needs_phase2:
@@ -176,19 +177,20 @@ class SKLTAttentionImpl(AttentionImpl[SKLTAttentionMetadata]):
             final_sparsity = attn_metadata.phase1_sparsity
 
         # Decode path: Use SKLT sparse attention
-        sklt_sparse_attention(
-            query=query[:num_actual_tokens],
-            key_cache=key_cache,
-            value_cache=value_cache,
-            sparsity_info=final_sparsity,
-            block_table=attn_metadata.block_table,
-            query_start_loc=attn_metadata.query_start_loc,
-            seq_lens=attn_metadata.seq_lens,
-            block_size=self.block_size,
-            scale=self.scale,
-            num_kv_heads=self.num_kv_heads,
-            output=output[:num_actual_tokens],
-        )
+        with torch.profiler.record_function("SKLT/decode_sparse"):
+            sklt_sparse_attention(
+                query=query[:num_actual_tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                sparsity_info=final_sparsity,
+                block_table=attn_metadata.block_table,
+                query_start_loc=attn_metadata.query_start_loc,
+                seq_lens=attn_metadata.seq_lens,
+                block_size=self.block_size,
+                scale=self.scale,
+                num_kv_heads=self.num_kv_heads,
+                output=output[:num_actual_tokens],
+            )
         
         # Reshape output to (num_tokens, num_heads * head_size)
         return output.view(output.shape[0], -1)

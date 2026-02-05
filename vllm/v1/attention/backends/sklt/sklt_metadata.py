@@ -57,10 +57,10 @@ class SKLTAttentionMetadata:
 class SKLTAttentionMetadataBuilder(AttentionMetadataBuilder[SKLTAttentionMetadata]):
     """Metadata builder for SKLT sparse attention."""
     
-    # SKLT currently uses PyTorch implementation with CPU synchronization (.cpu(), .item())
-    # which is not compatible with CUDA graph capture. Marking as NEVER until we have
-    # a CUDA-native kernel implementation.
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # SKLT supports CUDA graphs for uniform single-token decode.
+    _cudagraph_support: ClassVar[
+        AttentionCGSupport
+    ] = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     
     def __init__(
         self,
