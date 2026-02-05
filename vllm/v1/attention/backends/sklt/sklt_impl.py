@@ -153,12 +153,34 @@ class SKLTAttentionImpl(AttentionImpl[SKLTAttentionMetadata]):
             )
         logger.info(f"SKLT: Decoding")
 
+        # Phase 2: Refine sparsity if needed (for query-dependent indexers)
+        if attn_metadata.needs_phase2:
+            logger.debug("SKLT: Performing Phase 2 sparsity refinement")
+            
+            # Use indexer from metadata (created once in metadata builder)
+            assert attn_metadata.indexer is not None, \
+                "Indexer must be provided in metadata when needs_phase2 is True"
+            
+            final_sparsity = attn_metadata.indexer.compute_phase2_sparsity(
+                query=query[:num_actual_tokens],
+                key_cache=key_cache,
+                phase1_sparsity=attn_metadata.phase1_sparsity,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                query_start_loc=attn_metadata.query_start_loc,
+                scale=self.scale,
+                block_size=self.block_size,
+            )
+        else:
+            # Use Phase 1 sparsity directly
+            final_sparsity = attn_metadata.phase1_sparsity
+
         # Decode path: Use SKLT sparse attention
         sklt_sparse_attention(
             query=query[:num_actual_tokens],
             key_cache=key_cache,
             value_cache=value_cache,
-            sparsity_info=attn_metadata.sparsity_info,
+            sparsity_info=final_sparsity,
             block_table=attn_metadata.block_table,
             query_start_loc=attn_metadata.query_start_loc,
             seq_lens=attn_metadata.seq_lens,

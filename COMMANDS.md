@@ -58,7 +58,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Create LLM
@@ -90,7 +90,7 @@ print(outputs[0].outputs[0].text)
 /workspace/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
     --model facebook/opt-125m \
     --attention-backend SKLT \
-    --attention-config '{"indexer_config": {"indexer_type": "streaming", "num_sink_tokens": 4, "local_window_size": 512, "max_sparse_k": 1024}, "use_sparse_attention": true}' \
+    --attention-config '{"indexer_config": {"indexer_type": "streaming", "num_sink_tokens": 4, "local_window_size": 512, "max_sparse_k": 1024}, "use_sklt_sparse_attention": true}' \
     --enforce-eager \
     --port 8000
 ```
@@ -100,7 +100,7 @@ print(outputs[0].outputs[0].text)
 /workspace/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
     --model facebook/opt-125m \
     -ac.backend SKLT \
-    -ac.use_sparse_attention true \
+    -ac.use_sklt_sparse_attention true \
     -ac.indexer_config.indexer_type streaming \
     -ac.indexer_config.num_sink_tokens 4 \
     -ac.indexer_config.local_window_size 512 \
@@ -128,7 +128,7 @@ print(outputs[0].outputs[0].text)
 |-----------|------|----------|-------------|
 | `backend` | AttentionBackendEnum | ✅ | Set to `AttentionBackendEnum.SKLT` |
 | `indexer_config` | IndexerConfig | ✅ | Sparse pattern configuration |
-| `use_sparse_attention` | bool | ✅ | Must be `True` for SKLT |
+| `use_sklt_sparse_attention` | bool | ✅ | Must be `True` for SKLT |
 
 ---
 
@@ -161,7 +161,7 @@ max_batch = 32  # Reduce from 64
 ```python
 attention_config = AttentionConfig(
     ...
-    use_sparse_attention=True,  # Add this
+    use_sklt_sparse_attention=True,  # Add this
 )
 ```
 

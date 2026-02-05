@@ -172,7 +172,7 @@ class SKLTAttentionBackend(AttentionBackend):
         if not use_sparse:
             invalid_reasons.append(
                 "SKLT backend requires use_sparse=True. "
-                "Set attention_config.use_sparse_attention=True"
+                "Set attention_config.use_sklt_sparse_attention=True"
             )
         
         return invalid_reasons

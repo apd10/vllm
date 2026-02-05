@@ -19,11 +19,18 @@ logger = init_logger(__name__)
 class StreamingIndexer(BaseIndexer):
     """Indexer for streaming attention with sink tokens and local window.
     
+    This is a query-independent indexer - the pattern is fully determined
+    in Phase 1 without needing query information. Phase 2 is not needed.
+    
     For each query position q at sequence position (ctx_len + q):
     - Include first K sink tokens (positions 0 to K-1)
     - Include last W tokens in local window (positions max(K, pos-W) to pos)
     - Total sparse_k = number of unique positions in [sink ∪ window]
     """
+    
+    def needs_phase2_refinement(self) -> bool:
+        """Streaming indexer doesn't need Phase 2 refinement."""
+        return False
     
     def _init_buffers(self):
         """Pre-allocate buffers based on config and scheduler limits."""
@@ -73,7 +80,7 @@ class StreamingIndexer(BaseIndexer):
         total_mb = (len_bytes + idx_bytes + weights_bytes) / (1024 * 1024)
         return total_mb
     
-    def compute_sparsity(
+    def compute_phase1_sparsity(
         self,
         batch_size: int,
         num_queries: int,
@@ -83,7 +90,10 @@ class StreamingIndexer(BaseIndexer):
         query_start_loc: torch.Tensor,
         attn_metadata: Any,
     ) -> SparsityInfo:
-        """Compute streaming attention pattern.
+        """Phase 1: Compute complete streaming attention pattern.
+        
+        For streaming indexer, the entire pattern is determined here
+        (sink + window). No Phase 2 refinement needed.
         
         PyTorch implementation for correctness (to be optimized later).
         """

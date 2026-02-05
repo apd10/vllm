@@ -68,7 +68,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Create LLM
@@ -90,7 +90,7 @@ For vllm serve:
 /workspace/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
     --model facebook/opt-125m \
     --attention-backend SKLT \
-    --attention-config '{"indexer_config": {"indexer_type": "streaming", "num_sink_tokens": 4, "local_window_size": 512, "max_sparse_k": 1024}, "use_sparse_attention": true}' \
+    --attention-config '{"indexer_config": {"indexer_type": "streaming", "num_sink_tokens": 4, "local_window_size": 512, "max_sparse_k": 1024}, "use_sklt_sparse_attention": true}' \
     --enforce-eager
 ```
 
@@ -211,7 +211,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Use

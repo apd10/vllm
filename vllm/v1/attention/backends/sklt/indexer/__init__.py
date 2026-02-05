@@ -6,8 +6,16 @@ from vllm.v1.attention.backends.sklt.indexer.base_indexer import (
     BaseIndexer,
     SparsityInfo,
 )
+from vllm.v1.attention.backends.sklt.indexer.oracle_topk_indexer import (
+    OracleTopKIndexer,
+)
 from vllm.v1.attention.backends.sklt.indexer.streaming_indexer import (
     StreamingIndexer,
 )
 
-__all__ = ["BaseIndexer", "SparsityInfo", "StreamingIndexer"]
+__all__ = [
+    "BaseIndexer",
+    "OracleTopKIndexer",
+    "SparsityInfo",
+    "StreamingIndexer",
+]

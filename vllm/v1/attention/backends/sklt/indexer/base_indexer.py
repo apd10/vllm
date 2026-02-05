@@ -18,11 +18,11 @@ class SparsityInfo:
     Attributes:
         sparse_len: (B, queries, num_query_heads, 1) - number of valid keys per query head
         sparse_idx: (B, queries, num_query_heads, max_sparse_k) - indices of sparse keys
-        sparse_weights: (B, queries, num_query_heads, max_sparse_k) - attention weights
+        sparse_weights: (B, queries, num_query_heads, max_sparse_k) - optional attention weights
     """
     sparse_len: torch.Tensor
     sparse_idx: torch.Tensor
-    sparse_weights: torch.Tensor
+    sparse_weights: torch.Tensor | None = None
     
     def validate_shapes(self):
         """Ensure all tensors have compatible shapes."""
@@ -34,17 +34,24 @@ class SparsityInfo:
             f"sparse_idx shape mismatch: expected {(B, Q, H, max_k)}, "
             f"got {self.sparse_idx.shape}"
         )
-        assert self.sparse_weights.shape == (B, Q, H, max_k), (
-            f"sparse_weights shape mismatch: expected {(B, Q, H, max_k)}, "
-            f"got {self.sparse_weights.shape}"
-        )
+        if self.sparse_weights is not None:
+            assert self.sparse_weights.shape == (B, Q, H, max_k), (
+                f"sparse_weights shape mismatch: expected {(B, Q, H, max_k)}, "
+                f"got {self.sparse_weights.shape}"
+            )
 
 
 class BaseIndexer(ABC):
     """Base class for sparse attention indexers.
     
-    Indexers are responsible for computing sparsity patterns (which keys
-    each query attends to) and optional weights for weighted attention.
+    Two-phase architecture:
+    - Phase 1 (compute_phase1_sparsity): Query-independent pattern + buffer allocation
+    - Phase 2 (compute_phase2_sparsity): Query-dependent refinement (optional)
+    
+    Examples:
+    - Query-independent (e.g., streaming): Complete pattern in Phase 1, Phase 2 returns unchanged
+    - Query-dependent (e.g., pure top-k): Empty pattern in Phase 1, complete pattern in Phase 2
+    - Hybrid (e.g., sink+window+top-k): Base pattern in Phase 1, extended pattern in Phase 2
     """
     
     def __init__(self, indexer_config: IndexerConfig, device: torch.device):
@@ -68,8 +75,19 @@ class BaseIndexer(ABC):
         """
         pass
     
+    def needs_phase2_refinement(self) -> bool:
+        """Check if this indexer needs Phase 2 refinement.
+        
+        Returns:
+            True if Phase 2 will modify the sparsity pattern, False otherwise.
+            
+        Default: False (query-independent, Phase 2 not needed)
+        Override to return True for query-dependent or hybrid indexers.
+        """
+        return False
+    
     @abstractmethod
-    def compute_sparsity(
+    def compute_phase1_sparsity(
         self,
         batch_size: int,
         num_queries: int,
@@ -79,7 +97,13 @@ class BaseIndexer(ABC):
         query_start_loc: torch.Tensor,  # (B+1,) query positions
         attn_metadata: Any,  # Backend-specific metadata
     ) -> SparsityInfo:
-        """Compute sparse attention indices and weights.
+        """Phase 1: Compute query-independent sparsity pattern.
+        
+        Called in metadata builder (before model forward).
+        
+        For query-independent indexers: Returns complete sparsity pattern
+        For query-dependent indexers: Returns empty/placeholder pattern with allocated buffers
+        For hybrid indexers: Returns base pattern (e.g., sink+window) to be extended in Phase 2
         
         Args:
             batch_size: Number of sequences in batch
@@ -91,9 +115,45 @@ class BaseIndexer(ABC):
             attn_metadata: Additional metadata (backend-specific)
             
         Returns:
-            SparsityInfo with populated buffers (sliced views of pre-allocated buffers)
+            SparsityInfo with base pattern (may be extended in Phase 2)
         """
         pass
+    
+    def compute_phase2_sparsity(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        phase1_sparsity: SparsityInfo,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        scale: float,
+        block_size: int,
+    ) -> SparsityInfo:
+        """Phase 2: Refine/extend sparsity pattern using query information.
+        
+        Called in attention forward (after Q projection is computed).
+        Only called if needs_phase2_refinement() returns True.
+        
+        For query-independent indexers: Not called (needs_phase2_refinement() = False)
+        For query-dependent indexers: Computes complete pattern using query
+        For hybrid indexers: Extends phase1_sparsity with query-dependent indices
+        
+        Args:
+            query: Query tensor (num_tokens, num_heads, head_size)
+            key_cache: Key cache (num_blocks, block_size, num_kv_heads, head_size)
+            phase1_sparsity: Sparsity info from Phase 1
+            block_table: Block table mapping (batch_size, max_blocks)
+            seq_lens: Sequence lengths (batch_size,)
+            query_start_loc: Query start locations (batch_size + 1,)
+            scale: Attention scale factor
+            block_size: KV cache block size
+            
+        Returns:
+            Final sparsity info (may be same as phase1_sparsity or extended)
+        """
+        # Default: return Phase 1 sparsity unchanged (for QUERY_INDEPENDENT)
+        return phase1_sparsity
     
     @abstractmethod
     def get_max_sparse_k(self) -> int:

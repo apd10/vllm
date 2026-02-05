@@ -82,7 +82,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Use

@@ -50,7 +50,7 @@ All phases from the plan have been successfully implemented.
 
 ### 5. Registration & Testing (Phase 5) ✅
 - **Registry**: Added `SKLT` to `AttentionBackendEnum`
-- **Selector**: Updated to respect `use_sparse_attention` flag
+- **Selector**: Updated to respect `use_sklt_sparse_attention` flag
 - **Tests**:
   - `test_sklt_simple.py`: Component tests
   - `test_sklt_decode_only.py`: End-to-end decode test
@@ -107,7 +107,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Use with vLLM (decode-only workloads)

@@ -59,7 +59,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,      # REQUIRED for SKLT
+    use_sklt_sparse_attention=True,      # REQUIRED for SKLT
 )
 ```
 
@@ -104,7 +104,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Note: This will fail on prefill
@@ -153,7 +153,7 @@ SKLT backend validates:
 - ✅ Block sizes: 16, 32, 64, 128
 - ✅ Compute capability: >= 7.0 (Volta+)
 - ✅ Attention type: Decoder only
-- ✅ Sparse flag: `use_sparse_attention=True` (required)
+- ✅ Sparse flag: `use_sklt_sparse_attention=True` (required)
 
 ## File Structure
 
@@ -210,14 +210,14 @@ max_sparse_k = 256  # Set in IndexerConfig
 
 ### "use_sparse=True required"
 
-**Problem**: `use_sparse_attention=True` not set in AttentionConfig
+**Problem**: `use_sklt_sparse_attention=True` not set in AttentionConfig
 
 **Solution**:
 ```python
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,  # ← Add this
+    use_sklt_sparse_attention=True,  # ← Add this
 )
 ```
 

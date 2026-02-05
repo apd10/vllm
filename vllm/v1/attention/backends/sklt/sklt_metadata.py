@@ -39,11 +39,17 @@ class SKLTAttentionMetadata:
     slot_mapping: torch.Tensor
     
     # SKLT-specific: sparsity information
-    sparsity_info: SparsityInfo
+    # phase1_sparsity: Base pattern from Phase 1 (query-independent)
+    # For QUERY_INDEPENDENT indexers, this is the final pattern
+    # For HYBRID indexers, this will be extended in Phase 2
+    phase1_sparsity: SparsityInfo
     
-    # Optional cascade attention (future)
-    use_cascade: bool = False
-    common_prefix_len: int = 0
+    # Flag indicating if Phase 2 refinement is needed
+    needs_phase2: bool = False
+    
+    # Indexer instance (for Phase 2 refinement)
+    # Only needed if needs_phase2 is True
+    indexer: BaseIndexer | None = None
     
     causal: bool = True
 
@@ -89,10 +95,19 @@ class SKLTAttentionMetadataBuilder(AttentionMetadataBuilder[SKLTAttentionMetadat
                 f"num_sink_tokens={indexer_config.num_sink_tokens}, "
                 f"local_window_size={indexer_config.local_window_size}"
             )
+        elif indexer_config.indexer_type == "oracle_topk":
+            from vllm.v1.attention.backends.sklt.indexer import OracleTopKIndexer
+            self.indexer = OracleTopKIndexer(indexer_config, device)
+            logger.info(
+                f"SKLT: Initialized OracleTopKIndexer with "
+                f"num_sink_tokens={indexer_config.num_sink_tokens}, "
+                f"local_window_size={indexer_config.local_window_size}, "
+                f"max_sparse_k={indexer_config.max_sparse_k}"
+            )
         else:
             raise ValueError(
                 f"Unknown indexer type: {indexer_config.indexer_type}. "
-                f"Supported types: ['streaming']"
+                f"Supported types: ['streaming', 'oracle_topk']"
             )
         
         # Store model configuration
@@ -135,13 +150,14 @@ class SKLTAttentionMetadataBuilder(AttentionMetadataBuilder[SKLTAttentionMetadat
         slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
         
-        # Compute sparsity information ONLY for decode (max_query_len = 1)
-        # For prefill, we'll use fallback attention and sparsity_info won't be used
-        sparsity_info = None
+        # Phase 1: Compute query-independent sparsity pattern
+        # For prefill, we'll use fallback attention and sparsity won't be used
+        phase1_sparsity = None
+        needs_phase2 = False
         
         if max_query_len == 1:
-            # Decode phase: compute sparse patterns
-            sparsity_info = self.indexer.compute_sparsity(
+            # Decode phase: compute Phase 1 sparse patterns
+            phase1_sparsity = self.indexer.compute_phase1_sparsity(
                 batch_size=num_reqs,
                 num_queries=num_actual_tokens,
                 num_query_heads=self.num_heads_q,
@@ -151,12 +167,21 @@ class SKLTAttentionMetadataBuilder(AttentionMetadataBuilder[SKLTAttentionMetadat
                 attn_metadata=common_attn_metadata,
             )
             
-            # Validate sparsity info
+            # Validate Phase 1 sparsity info
             try:
-                sparsity_info.validate_shapes()
+                phase1_sparsity.validate_shapes()
             except AssertionError as e:
-                logger.error(f"SKLT: Sparsity info validation failed: {e}")
+                logger.error(f"SKLT: Phase 1 sparsity validation failed: {e}")
                 raise
+            
+            # Check if Phase 2 refinement is needed
+            needs_phase2 = self.indexer.needs_phase2_refinement()
+            
+            if needs_phase2:
+                logger.debug(
+                    f"SKLT: Indexer requires Phase 2 refinement, "
+                    "will be performed in attention forward."
+                )
         else:
             # Prefill phase: create dummy sparsity info (won't be used)
             # This is just to satisfy the metadata structure
@@ -165,14 +190,12 @@ class SKLTAttentionMetadataBuilder(AttentionMetadataBuilder[SKLTAttentionMetadat
                 "Skipping sparsity computation - will use fallback attention."
             )
             # Create empty/dummy sparsity info
-            from vllm.v1.attention.backends.sklt.indexer import SparsityInfo
-            sparsity_info = SparsityInfo(
+            phase1_sparsity = SparsityInfo(
                 sparse_len=torch.zeros((num_reqs, 1, self.num_heads_q, 1), 
                                       dtype=torch.int32, device=self.device),
                 sparse_idx=torch.zeros((num_reqs, 1, self.num_heads_q, 1), 
                                       dtype=torch.int32, device=self.device),
-                sparse_weights=torch.zeros((num_reqs, 1, self.num_heads_q, 1), 
-                                          dtype=torch.float32, device=self.device),
+                sparse_weights=None,
             )
         
         return SKLTAttentionMetadata(
@@ -183,8 +206,8 @@ class SKLTAttentionMetadataBuilder(AttentionMetadataBuilder[SKLTAttentionMetadat
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            sparsity_info=sparsity_info,
-            use_cascade=common_prefix_len > 0,
-            common_prefix_len=common_prefix_len,
+            phase1_sparsity=phase1_sparsity,
+            needs_phase2=needs_phase2,
+            indexer=self.indexer if needs_phase2 else None,  # Pass indexer for Phase 2
             causal=causal,
         )

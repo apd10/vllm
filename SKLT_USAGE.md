@@ -37,7 +37,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 ```
 
@@ -61,7 +61,7 @@ indexer_config = IndexerConfig(
 attention_config = AttentionConfig(
     backend=AttentionBackendEnum.SKLT,
     indexer_config=indexer_config,
-    use_sparse_attention=True,
+    use_sklt_sparse_attention=True,
 )
 
 # Create LLM with SKLT backend
@@ -91,7 +91,7 @@ for output in outputs:
 python -m vllm.entrypoints.openai.api_server \
     --model facebook/opt-125m \
     --attention-backend SKLT \
-    --attention-config '{"indexer_config": {"indexer_type": "streaming", "num_sink_tokens": 4, "local_window_size": 512, "max_sparse_k": 1024}, "use_sparse_attention": true}' \
+    --attention-config '{"indexer_config": {"indexer_type": "streaming", "num_sink_tokens": 4, "local_window_size": 512, "max_sparse_k": 1024}, "use_sklt_sparse_attention": true}' \
     --enforce-eager
 ```
 
@@ -101,7 +101,7 @@ Or use the structured config format:
 /workspace/anaconda3/envs/vllm/bin/python -m vllm.entrypoints.openai.api_server \
     --model facebook/opt-125m \
     -ac.backend SKLT \
-    -ac.use_sparse_attention true \
+    -ac.use_sklt_sparse_attention true \
     -ac.indexer_config.indexer_type streaming \
     -ac.indexer_config.num_sink_tokens 4 \
     -ac.indexer_config.local_window_size 512 \
@@ -175,7 +175,7 @@ indexer_config = IndexerConfig(
 ### Backend Validation Errors
 
 Ensure you have:
-- `use_sparse_attention=True` in `AttentionConfig`
+- `use_sklt_sparse_attention=True` in `AttentionConfig`
 - Valid `indexer_config` in `AttentionConfig`
 - CUDA device with compute capability >= 7.0
 

@@ -160,7 +160,7 @@ def main():
     attention_config = AttentionConfig(
         backend=AttentionBackendEnum.SKLT,
         indexer_config=indexer_config,
-        use_sparse_attention=True,
+        use_sklt_sparse_attention=True,
     )
     
     print("Initializing LLM with SKLT backend and profiler...")

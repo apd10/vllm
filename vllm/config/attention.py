@@ -80,8 +80,8 @@ class AttentionConfig:
     indexer_config: Optional[IndexerConfig] = None
     """Configuration for sparse attention indexer (used by SKLT backend)."""
     
-    use_sparse_attention: bool = False
-    """Enable sparse attention patterns."""
+    use_sklt_sparse_attention: bool = False
+    """Enable SKLT sparse attention patterns."""
 
     def compute_hash(self) -> str:
         """
