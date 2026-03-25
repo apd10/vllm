@@ -42,6 +42,7 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
+from .skylight import SkylightConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
@@ -327,6 +328,9 @@ class VllmConfig:  # type: ignore[misc]
     'throughput' favors aggregate tokens/sec at high concurrency (larger CUDA
     graphs, more aggressive batching, throughput-oriented kernels)."""
 
+    skylight_config: SkylightConfig | None = None
+    """Skylight sparse attention configuration."""
+
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
 
@@ -420,6 +424,10 @@ class VllmConfig:  # type: ignore[misc]
             vllm_factors.append("None")
         if self.ec_transfer_config:
             vllm_factors.append(self.ec_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.skylight_config:
+            vllm_factors.append(self.skylight_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -1047,6 +1055,19 @@ class VllmConfig:  # type: ignore[misc]
             )
         current_platform.check_and_update_config(self)
 
+        if (self.skylight_config is not None
+                and self.skylight_config.use_sparse_attention):
+            SKYLIGHT_BACKEND = "SKYLIGHT"
+            if (
+                self.attention_config.backend is not None
+                and self.attention_config.backend.value != SKYLIGHT_BACKEND
+            ):
+                raise ValueError(
+                    f"Skylight sparse attention requires the "
+                    f"'{SKYLIGHT_BACKEND}' attention backend, but got "
+                    f"'{self.attention_config.backend}'."
+                )
+
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -1651,7 +1672,8 @@ class VllmConfig:  # type: ignore[misc]
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}"
+            f"compilation_config={self.compilation_config!r}, "
+            f"skylight_config={self.skylight_config!r}"
         )
 
     def validate_block_size(self) -> None:
