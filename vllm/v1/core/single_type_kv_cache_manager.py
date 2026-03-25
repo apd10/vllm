@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
+    SkylightSparseAttentionPQCacheIndexerSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -431,10 +432,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
+            kv_cache_spec,
+            FullAttentionSpec
+            | ChunkedLocalAttentionSpec
+            | SkylightSparseAttentionPQCacheIndexerSpec,
         ), (
-            "FullAttentionManager can only be used for full attention "
-            "and chunked local attention groups"
+            "FullAttentionManager can only be used for full attention, "
+            "chunked local attention, and Skylight PQ indexer groups"
         )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
@@ -1114,6 +1118,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
     SinkFullAttentionSpec: SinkFullAttentionManager,
+    SkylightSparseAttentionPQCacheIndexerSpec: FullAttentionManager,
 }
 
 

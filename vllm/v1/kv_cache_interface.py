@@ -372,6 +372,53 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
 
 @dataclass(frozen=True)
+class SkylightSparseAttentionPQCacheIndexerSpec(KVCacheSpec):
+    """KV cache spec for the Skylight PQCache indexer.
+
+    Describes a per-layer product-quantised index that stores compact
+    codes for each token. The index is used at decode time for top-k
+    token selection before reading the full KV cache.
+
+    Attributes:
+        pq_bits: Number of bits per PQ sub-quantiser.
+        pq_group_factor: Number of PQ sub-quantiser groups.
+        page_size_padded: Optional override for page size, used in hybrid
+            models to align with attention page size when block_size
+            inflation alone cannot produce an exact match.
+    """
+
+    pq_bits: int
+    pq_group_factor: int
+    page_size_padded: int | None = None
+
+    @property
+    def page_size_bytes(self) -> int:
+        real_size: int = self.real_page_size_bytes
+        if self.page_size_padded is not None:
+            assert self.page_size_padded >= real_size
+            return self.page_size_padded
+        return real_size
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        bytes_per_token: int = (self.pq_group_factor * self.pq_bits) // 8
+        return self.block_size * bytes_per_token
+
+    # TODO: Support merging specs with different pq_bits / pq_group_factor.
+    # Some models may use different PQ parameters per layer. When that happens,
+    # override merge() to produce a UniformTypeKVCacheSpecs-style composite
+    # (summing page sizes) rather than requiring exact equality.
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len: int = vllm_config.model_config.max_model_len
+        dcp_world_size: int = vllm_config.parallel_config.decode_context_parallel_size
+        pcp_world_size: int = vllm_config.parallel_config.prefill_context_parallel_size
+        if dcp_world_size * pcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+
+@dataclass(frozen=True)
 class UniformTypeKVCacheSpecs(KVCacheSpec):
     """
     A KV cache spec for multiple layers with the same type of attention. Here,
@@ -427,6 +474,11 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             return all(
                 isinstance(spec, MambaSpec)
                 and spec.num_speculative_blocks == one_spec.num_speculative_blocks
+                for spec in kv_cache_specs.values()
+            )
+        elif isinstance(one_spec, SkylightSparseAttentionPQCacheIndexerSpec):
+            return all(
+                isinstance(spec, SkylightSparseAttentionPQCacheIndexerSpec)
                 for spec in kv_cache_specs.values()
             )
         else:
