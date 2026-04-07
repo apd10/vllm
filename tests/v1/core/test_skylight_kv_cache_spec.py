@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.skylight.kv_cache_spec import SkylightSparseAttentionPQCacheIndexerSpec
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import unify_kv_cache_spec_page_size
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -15,7 +16,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    SkylightSparseAttentionPQCacheIndexerSpec,
     UniformTypeKVCacheSpecs,
 )
 

@@ -76,6 +76,7 @@ class SkyLightMetadataBuilder(AttentionMetadataBuilder[SkyLightIndexerMetadata])
         layer_names: Layer names sharing this builder (from ``__init__``).
         vllm_config: Global config (from ``__init__``).
         device: Target device (from ``__init__``).
+        
     """
 
     reorder_batch_threshold: ClassVar[int] = 1
@@ -96,7 +97,26 @@ class SkyLightMetadataBuilder(AttentionMetadataBuilder[SkyLightIndexerMetadata])
         fast_build: bool = False,
     ) -> SkyLightIndexerMetadata:
         """Build indexer metadata from ``common_attn_metadata``."""
-        raise NotImplementedError
+        del common_prefix_len, fast_build
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+            )
+        )
+
+        return SkyLightIndexerMetadata(
+            slot_mapping=common_attn_metadata.slot_mapping,
+            block_table=common_attn_metadata.block_table_tensor,
+            seq_lens=common_attn_metadata.seq_lens,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+        )
 
 # ---------------------------------------------------------------------------
 # Attention backend

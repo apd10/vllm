@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
+from vllm.skylight.kv_cache_spec import SkylightSparseAttentionPQCacheIndexerSpec
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -20,7 +21,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
-    SkylightSparseAttentionPQCacheIndexerSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request

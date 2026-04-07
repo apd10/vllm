@@ -5,7 +5,8 @@
 
 Contains:
 - ``SkyLightIndexerCache`` — base cache (``AttentionLayerBase`` integration).
-- ``SkyLightIndexerPQCache`` — PQ-specific subclass returning ``PQCacheSpec``.
+- ``SkyLightIndexerPQCache`` — PQ-specific subclass returning the shared
+  ``SkylightSparseAttentionPQCacheIndexerSpec``.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from torch import nn
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.skylight.attention_backend import SkyLightAttentionBackend
-from vllm.skylight.kv_cache_spec import PQCacheSpec
+from vllm.skylight.kv_cache_spec import SkylightSparseAttentionPQCacheIndexerSpec
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
@@ -76,8 +77,8 @@ class SkyLightIndexerCache(nn.Module, AttentionLayerBase):
 class SkyLightIndexerPQCache(SkyLightIndexerCache):
     """PQ-specific indexer cache.
 
-    Returns ``PQCacheSpec`` so that vLLM allocates appropriately-sized blocks
-    for codebook storage.
+    Returns ``SkylightSparseAttentionPQCacheIndexerSpec`` so that vLLM
+    allocates appropriately-sized blocks for codebook storage.
 
     Attributes:
         head_dim: Key dimension per token.
@@ -102,18 +103,16 @@ class SkyLightIndexerPQCache(SkyLightIndexerCache):
         self.group_factor: int = group_factor
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        """Returns ``PQCacheSpec`` for PQ codebook block allocation.
+        """Returns the shared PQ cache spec for codebook block allocation.
 
         Args:
             vllm_config: Global vLLM config.
 
         Returns:
-            ``PQCacheSpec`` instance with PQ-specific parameters.
+            ``SkylightSparseAttentionPQCacheIndexerSpec`` with PQ parameters.
         """
-        return PQCacheSpec(
+        return SkylightSparseAttentionPQCacheIndexerSpec(
             block_size=self.cache_config.block_size,
-            num_kv_heads=1,
-            dtype=self.dtype,
             pq_bits=self.pq_bits,
-            group_factor=self.group_factor,
+            pq_group_factor=self.group_factor,
         )
