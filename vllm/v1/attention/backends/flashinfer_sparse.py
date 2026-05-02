@@ -9,11 +9,13 @@ package, which:
 
   1. computes dense ``Q @ K^T`` selection scores using only the first
      ``channel_num`` head channels (``-1`` means full ``head_dim``),
-  2. picks the ``topk`` largest indices per ``(batch, query_head)``,
+  2. picks ``k = max(1, min(n_keys, round(topk * n_keys)))`` indices per
+     ``(batch, query_head)``, where ``topk`` is a **fraction** from config
+     and ``n_keys`` is the per-batch max context length from the scheduler,
   3. runs paged sparse decode over the selected indices using the full
      ``head_dim``.
 
-The ``topk`` and ``channel_num`` knobs are read from
+The ``topk`` (float fraction) and ``channel_num`` knobs are read from
 ``AttentionConfig`` and may be supplied via ``--attention-config`` on the
 CLI or by passing ``attention_config={...}`` to ``LLM(...)``.
 """
@@ -27,10 +29,16 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
 from vllm.v1.attention.backends.flashinfer import (
+    FIDecode,
     FlashInferBackend,
     FlashInferImpl,
+    FlashInferMetadata,
     FlashInferMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -77,10 +85,12 @@ class _SparseDecodeWrapperAdapter:
 
     All other attribute access (``_window_left``, ``_sm_scale``,
     ``_logits_soft_cap``, ``run``, ``plan``, ...) is forwarded
-    transparently to the inner wrapper. ``top_k`` / ``channel_num`` are
-    configured on the inner wrapper via its constructor, so the impl's
+    transparently to the inner wrapper. ``topk`` (fraction) /
+    ``channel_num`` are configured on the inner wrapper via its
+    constructor, so the impl's
     ``decode_wrapper.run(q, kv_cache, k_scale=..., v_scale=..., out=...)``
-    call works unchanged.
+    call works unchanged. Per-batch ``n_keys`` is updated in
+    :meth:`FlashInferSparseMetadataBuilder.build`.
     """
 
     is_cuda_graph_enabled: ClassVar[bool] = False
@@ -166,12 +176,12 @@ class FlashInferSparseMetadataBuilder(FlashInferMetadataBuilder):
         if attn_cfg.topk is None or attn_cfg.topk <= 0:
             raise ValueError(
                 "FLASHINFER_SPARSE backend requires `attention_config.topk` "
-                "to be a positive int. Pass it via "
-                "`--attention-config.topk=<int>` on the CLI or "
-                "`attention_config={'topk': <int>}` in Python."
+                "to be a finite float > 0 (fraction of KV positions). "
+                "Pass it via `--attention-config.topk=<float>` on the CLI or "
+                "`attention_config={'topk': <float>}` in Python."
             )
 
-        self.sparse_top_k: int = int(attn_cfg.topk)
+        self.sparse_topk: float = float(attn_cfg.topk)
         # `-1` means "use the full head_dim". Resolve it now that we know
         # head_dim so the adapter forwards a concrete value to the kernel.
         if attn_cfg.channel_num == -1:
@@ -212,10 +222,48 @@ class FlashInferSparseMetadataBuilder(FlashInferMetadataBuilder):
             paged_kv_indices_buffer=paged_kv_indices,
             paged_kv_last_page_len_buffer=paged_kv_last_page_len,
             use_tensor_cores=True,
-            top_k=self.sparse_top_k,
+            topk=self.sparse_topk,
             channel_num=self.sparse_channel_num,
             max_seq_len=self._sparse_max_seq_len,
         )
+
+    @staticmethod
+    def _sparse_set_n_keys_on_fi_decode(
+        decode: FIDecode | None, n_keys: int
+    ) -> None:
+        """Tell the sparse wrapper the true max context length for this batch.
+
+        The score tensor last dim is padded to ``max_model_len``; fractional
+        ``topk`` must scale against the batch's real max sequence length, not
+        the padded axis length (see ``sparse_oracle_topk_optimized`` docs).
+        """
+        if decode is None:
+            return
+        w = decode.wrapper
+        inner = getattr(w, "_inner", w)
+        setter = getattr(inner, "set_n_keys", None)
+        if callable(setter):
+            setter(int(n_keys))
+
+    @override  # type: ignore[misc]
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> FlashInferMetadata:
+        attn_metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build=fast_build,
+        )
+        self._sparse_set_n_keys_on_fi_decode(
+            attn_metadata.decode
+            if isinstance(attn_metadata.decode, FIDecode)
+            else None,
+            int(common_attn_metadata.max_seq_len),
+        )
+        return attn_metadata
 
     @override  # type: ignore[misc]
     def _get_decode_wrapper(

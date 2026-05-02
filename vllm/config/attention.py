@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from typing import Any, Literal
 
 from pydantic import field_validator
@@ -57,10 +58,15 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
-    topk: int | None = None
-    """Number of KV tokens kept per (batch, query head) for sparse attention
-    backends (currently `FLASHINFER_SPARSE`). Required when using a sparse
-    backend that does not infer this value from the model. Ignored otherwise."""
+    topk: float | None = None
+    """Fraction of KV positions kept per (batch, query head) for sparse
+    attention backends (currently `FLASHINFER_SPARSE`). Passed to
+    ``sparse_oracle_topk_optimized`` as ``topk``; effective integer k is
+    ``max(1, min(n_keys, round(topk * n_keys)))`` where ``n_keys`` is the
+    per-batch max context length (vLLM sets this from scheduler metadata).
+    Typical values are in ``(0, 1]`` (e.g. ``0.02`` ≈ 2% of keys). Must be
+    finite and ``> 0``. Required when using ``FLASHINFER_SPARSE``. Ignored
+    otherwise."""
 
     channel_num: int = -1
     """Number of leading head channels used for the sparse top-k selection
@@ -95,3 +101,34 @@ class AttentionConfig:
                 return None
             return AttentionBackendEnum[value.upper()]
         return value
+
+    @field_validator("topk", mode="before")
+    @classmethod
+    def validate_topk_before(cls, value: Any) -> Any:
+        """Coerce CLI/JSON strings; reject bool (``bool`` is a ``int`` subclass)."""
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError(
+                "attention_config.topk must be a numeric fraction, not a boolean."
+            )
+        if isinstance(value, str):
+            try:
+                v = float(value)
+            except ValueError as e:
+                raise ValueError(
+                    f"attention_config.topk must parse as a float, got {value!r}."
+                ) from e
+        elif isinstance(value, (int, float)):
+            v = float(value)
+        else:
+            raise TypeError(
+                "attention_config.topk must be int, float, or str, "
+                f"got {type(value).__name__}."
+            )
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError(
+                "attention_config.topk must be finite and > 0 "
+                f"(fraction of KV positions for FLASHINFER_SPARSE), got {value!r}."
+            )
+        return v

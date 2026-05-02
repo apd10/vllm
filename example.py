@@ -23,8 +23,11 @@ def main() -> None:
     # Initialize LLM with FlashInfer-Sparse
     # -----------------------------
     # `channel_num=-1` means the score kernel uses the full head_dim for
-    # the top-k selection (no partial-D approximation). `topk=128` keeps
-    # the 128 most relevant KV tokens per (batch, query head) at decode.
+    # the top-k selection (no partial-D approximation). `topk` is a
+    # **fraction** of KV positions: k ≈ round(topk * n_keys) per head,
+    # with n_keys ≈ per-batch max seq len. Here 128/8192 ≈ 1.56% of keys
+    # when context is near max_model_len (similar spirit to keeping ~128
+    # tokens at 8K max length).
     llm = LLM(
         model=model_name,
         dtype="bfloat16",                 # or "float16" depending on GPU
@@ -33,7 +36,7 @@ def main() -> None:
         trust_remote_code=True,
         attention_config=AttentionConfig(
             backend="FLASHINFER_SPARSE",
-            topk=128,
+            topk=128 / 8192,
             channel_num=-1,
         ),
     )
