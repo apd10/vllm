@@ -57,6 +57,17 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
+    topk: int | None = None
+    """Number of KV tokens kept per (batch, query head) for sparse attention
+    backends (currently `FLASHINFER_SPARSE`). Required when using a sparse
+    backend that does not infer this value from the model. Ignored otherwise."""
+
+    channel_num: int = -1
+    """Number of leading head channels used for the sparse top-k selection
+    score in `FLASHINFER_SPARSE`. Set to `-1` (default) to use the full
+    `head_dim`. Must be a multiple of the kernel's vector lane width
+    (8 for fp16/bf16, 4 for fp32). Ignored by non-sparse backends."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
