@@ -4,7 +4,7 @@
 
 Same as ``FLASHINFER`` for prefill, cascade attention and the KV-cache
 update path. The per-step decode wrapper is swapped for the standalone
-oracle top-k sparse wrapper from the ``sparse_oracle_topk_optimized``
+oracle top-k sparse wrapper from the ``sparse_oracle_topk_sink_local_optimized``
 package, which:
 
   1. computes dense ``Q @ K^T`` selection scores using only the first
@@ -12,12 +12,15 @@ package, which:
   2. picks ``k = max(1, min(n_keys, round(topk * n_keys)))`` indices per
      ``(batch, query_head)``, where ``topk`` is a **fraction** from config
      and ``n_keys`` is the per-batch max context length from the scheduler,
-  3. runs paged sparse decode over the selected indices using the full
-     ``head_dim``.
+  3. unconditionally keeps the first ``sink_size`` tokens (attention sinks)
+     and the last ``local_size`` tokens (local window),
+  4. runs paged sparse decode over the union of selected indices using the
+     full ``head_dim``.
 
-The ``topk`` (float fraction) and ``channel_num`` knobs are read from
-``AttentionConfig`` and may be supplied via ``--attention-config`` on the
-CLI or by passing ``attention_config={...}`` to ``LLM(...)``.
+The ``topk`` (float fraction), ``channel_num``, ``sink_size``, and
+``local_size`` knobs are read from ``AttentionConfig`` and may be supplied
+via ``--attention-config`` on the CLI or by passing
+``attention_config={...}`` to ``LLM(...)``.
 """
 
 from typing import Any, ClassVar
@@ -48,19 +51,19 @@ logger = init_logger(__name__)
 
 
 def _import_sparse_oracle_topk_wrapper_cls():
-    """Lazily import the standalone sparse oracle top-k wrapper.
+    """Lazily import the standalone sparse oracle top-k sink+local wrapper.
 
     Kept lazy so that ``import vllm`` does not require the optional
-    ``sparse_oracle_topk_optimized`` package to be installed.
+    ``sparse_oracle_topk_sink_local_optimized`` package to be installed.
     """
     try:
-        from sparse_oracle_topk_optimized import (
+        from sparse_oracle_topk_sink_local_optimized import (
             BatchDecodeWithPagedKVCacheWrapper as SparseOracleTopKDecodeWrapper,
         )
     except ImportError as e:
         raise ImportError(
             "FLASHINFER_SPARSE backend requires the standalone "
-            "`sparse_oracle_topk_optimized` package to be importable. "
+            "`sparse_oracle_topk_sink_local_optimized` package to be importable. "
             "Make sure its containing directory is on PYTHONPATH. "
             f"Original error: {e}"
         ) from e
@@ -68,7 +71,7 @@ def _import_sparse_oracle_topk_wrapper_cls():
 
 
 class _SparseDecodeWrapperAdapter:
-    """Thin adapter around the sparse oracle top-k wrapper.
+    """Thin adapter around the sparse oracle top-k sink+local wrapper.
 
     The sparse wrapper inherits from ``original_optimized``, not from
     ``flashinfer.BatchDecodeWithPagedKVCacheWrapper``. vLLM's
@@ -86,8 +89,8 @@ class _SparseDecodeWrapperAdapter:
     All other attribute access (``_window_left``, ``_sm_scale``,
     ``_logits_soft_cap``, ``run``, ``plan``, ...) is forwarded
     transparently to the inner wrapper. ``topk`` (fraction) /
-    ``channel_num`` are configured on the inner wrapper via its
-    constructor, so the impl's
+    ``channel_num`` / ``sink_size`` / ``local_size`` are configured on the
+    inner wrapper via its constructor, so the impl's
     ``decode_wrapper.run(q, kv_cache, k_scale=..., v_scale=..., out=...)``
     call works unchanged. Per-batch ``n_keys`` is updated in
     :meth:`FlashInferSparseMetadataBuilder.build`.
@@ -178,7 +181,10 @@ class FlashInferSparseMetadataBuilder(FlashInferMetadataBuilder):
                 "FLASHINFER_SPARSE backend requires `attention_config.topk` "
                 "to be a finite float > 0 (fraction of KV positions). "
                 "Pass it via `--attention-config.topk=<float>` on the CLI or "
-                "`attention_config={'topk': <float>}` in Python."
+                "`attention_config={'topk': <float>}` in Python. "
+                "Optionally set `sink_size` and `local_size` for the "
+                "sink+local window via `--attention-config.sink_size=<int>` "
+                "and `--attention-config.local_size=<int>`."
             )
 
         self.sparse_topk: float = float(attn_cfg.topk)
@@ -188,6 +194,9 @@ class FlashInferSparseMetadataBuilder(FlashInferMetadataBuilder):
             self.sparse_channel_num: int = int(self.head_dim)
         else:
             self.sparse_channel_num = int(attn_cfg.channel_num)
+
+        self.sparse_sink_size: int = int(attn_cfg.sink_size)
+        self.sparse_local_size: int = int(attn_cfg.local_size)
 
         # Force the FI-native decode path; the sparse wrapper replaces
         # the dense decode kernel and TRTLLM has no equivalent here.
@@ -224,6 +233,8 @@ class FlashInferSparseMetadataBuilder(FlashInferMetadataBuilder):
             use_tensor_cores=True,
             topk=self.sparse_topk,
             channel_num=self.sparse_channel_num,
+            sink_size=self.sparse_sink_size,
+            local_size=self.sparse_local_size,
             max_seq_len=self._sparse_max_seq_len,
         )
 

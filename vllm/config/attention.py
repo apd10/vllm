@@ -74,6 +74,22 @@ class AttentionConfig:
     `head_dim`. Must be a multiple of the kernel's vector lane width
     (8 for fp16/bf16, 4 for fp32). Ignored by non-sparse backends."""
 
+    sink_size: int = 0
+    """Number of initial (sink) KV positions that are always kept during
+    sparse decode in `FLASHINFER_SPARSE` when using the
+    ``sparse_oracle_topk_sink_local_optimized`` kernel. These tokens are
+    attended to unconditionally in addition to the top-k and local window
+    selections. A value of ``0`` (default) disables the sink. Ignored by
+    non-sparse backends."""
+
+    local_size: int = 0
+    """Number of most-recent (local) KV positions that are always kept during
+    sparse decode in `FLASHINFER_SPARSE` when using the
+    ``sparse_oracle_topk_sink_local_optimized`` kernel. These tokens are
+    attended to unconditionally in addition to the top-k and sink selections.
+    A value of ``0`` (default) disables the local window. Ignored by
+    non-sparse backends."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
